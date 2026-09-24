@@ -44,7 +44,7 @@ def create_btn(text, callback_data=None, url=None, style=ButtonStyle.PRIMARY, no
 # ==========================================
 # 🛑 MAIN CLONE COMMAND LOGIC
 # ==========================================
-BOT_LINK = "https://t.me/clone_MUSICrobot"
+BOT_LINK = "https://t.me/SizzuMusicBot"
 
 # ✅ Helper to safely get Random Start Image
 def get_random_start_img():
