@@ -29,7 +29,7 @@ from SHIVMUSIC.utils.database import (
     set_loop,
     is_autoplay_on,
 )
-from SHIVMUSIC.utils.autoplay import fetch_autoplay_track, remember_played
+from SHIVMUSIC.utils.autoplay import fetch_autoplay_track, remember_played, note_played
 from SHIVMUSIC.utils.stream.queue import put_queue
 from SHIVMUSIC.utils.logger import play_logs
 from SHIVMUSIC.utils.exceptions import AssistantErr
@@ -430,8 +430,7 @@ class Call:
 
         if not file_path:
             return await _fail()
-
-        remember_played(chat_id, track["vidid"])
+remember_played(chat_id, track["vidid"])
         title = track["title"].title()
         duration_min = track["duration_min"]
 
@@ -631,7 +630,19 @@ class Call:
                 loop = loop - 1
                 await set_loop(chat_id, loop)
 
-            if popped: await auto_clean(popped)
+            if popped:
+                await auto_clean(popped)
+                # Teach autoplay the chat's vibe from every track that played.
+                try:
+                    note_played(
+                        chat_id,
+                        popped.get("title"),
+                        popped.get("vidid"),
+                        str(popped.get("by") or ""),
+                        seconds=int(popped.get("seconds") or 0),
+                    )
+                except Exception:
+                    pass
 
             if not db.get(chat_id): 
                 if popped and await is_autoplay_on(chat_id):
@@ -780,7 +791,7 @@ class Call:
                 except: return await chat_client.send_message(original_chat_id, text=_["call_6"])
 
                 button = telegram_markup(_, chat_id)
-                try:
+                try:        
                     run = await chat_client.send_photo(
                         chat_id=original_chat_id, photo=get_random_img(config.STREAM_IMG_URL),
                         caption=_["stream_2"].format(user), reply_markup=InlineKeyboardMarkup(button)
