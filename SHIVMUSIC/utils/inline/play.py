@@ -8,6 +8,7 @@ from config import SUPPORT_CHAT, OWNER_USERNAME
 from SHIVMUSIC import app
 import config
 from SHIVMUSIC.utils.formatters import time_to_seconds
+from SHIVMUSIC.utils.inline import btn as _premium_guard  # noqa: F401  (premium icon if owner has Premium, else normal)
 
 # 💎 Premium Emojis ID List for Pyrogram's icon_custom_emoji_id
 PREMIUM_EMOJIS = [
