@@ -12,6 +12,7 @@ import inspect
 import logging
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from functools import wraps
@@ -19,6 +20,7 @@ from typing import Any, Optional
 
 import config
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 
 MAX_TELEGRAM_MESSAGE_LENGTH = 3900
@@ -33,6 +35,69 @@ _main_client: Any = None
 _logging_handler_installed = False
 _global_hooks_installed = False
 _loop_handlers: set[int] = set()
+
+# ---- Feedback-loop protection -------------------------------------------
+# A network/socket failure (e.g. "[Errno 24] Too many open files") makes
+# pyrogram log ERROR records. Forwarding those to Telegram opens *more*
+# sockets, which fails again, which logs again... forever. These guards stop it.
+_IGNORED_LOGGER_PREFIXES = (
+    "pyrogram",
+    "pytgcalls",
+    "ntgcalls",
+    "asyncio",
+    "httpx",
+    "httpcore",
+    "motor",
+    "pymongo",
+)
+_MIN_REPORT_INTERVAL = 3.0      # seconds between any two reports
+_DUPLICATE_WINDOW = 120.0       # same error is reported at most once per window
+_FAILURE_COOLDOWN = 60.0        # pause all reporting after a failed send
+_MAX_PENDING_REPORTS = 5        # never queue more than this many report tasks
+_last_report_at = 0.0
+_suppressed_until = 0.0
+_recent_reports: dict[str, float] = {}
+_pending_reports = 0
+
+
+def _is_network_error(exception: BaseException) -> bool:
+    """True for socket/connection failures that Telegram cannot report anyway."""
+    if isinstance(exception, (OSError, ConnectionError, TimeoutError, asyncio.TimeoutError)):
+        return True
+    text = f"{type(exception).__name__} {exception}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "too many open files",
+            "errno 24",
+            "connection failed",
+            "connection reset",
+            "connection lost",
+            "timed out",
+        )
+    )
+
+
+def _should_report(exception: BaseException, context: str) -> bool:
+    """Rate-limit, de-duplicate and circuit-break error reports."""
+    global _last_report_at
+    now = time.monotonic()
+
+    if _is_network_error(exception) or now < _suppressed_until:
+        return False
+    if now - _last_report_at < _MIN_REPORT_INTERVAL:
+        return False
+
+    key = f"{type(exception).__name__}:{_safe_text(exception, 200)}:{context}"
+    for old_key, seen_at in list(_recent_reports.items()):
+        if now - seen_at > _DUPLICATE_WINDOW:
+            _recent_reports.pop(old_key, None)
+    if key in _recent_reports:
+        return False
+
+    _recent_reports[key] = now
+    _last_report_at = now
+    return True
 
 
 def _safe_text(value: Any, limit: int = 600) -> str:
@@ -157,6 +222,8 @@ async def report_exception(
     # Avoid recursively reporting a failure caused by the logger itself.
     if _reporting_error.get():
         return
+    if not _should_report(exception, context):
+        return
     report_token = _reporting_error.set(True)
 
     try:
@@ -195,12 +262,14 @@ async def report_exception(
                 await target.send_message(
                     chat_id=logger_id,
                     text=message,
-                    parse_mode="html",
+                    parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
             except Exception as send_error:
                 # Never use LOGGER.error here: the logging bridge would call
                 # this function again. stderr is the safe last-resort path.
+                global _suppressed_until
+                _suppressed_until = time.monotonic() + _FAILURE_COOLDOWN
                 print(
                     "SHIVMUSIC error logger could not send report: "
                     f"{type(send_error).__name__}: {send_error}",
@@ -213,6 +282,8 @@ async def report_exception(
 
 async def _report_log_record(client: Any, record: logging.LogRecord) -> None:
     if getattr(record, "_shivmusic_error_report", False):
+        return
+    if record.name.startswith(_IGNORED_LOGGER_PREFIXES):
         return
 
     if record.exc_info and record.exc_info[1] is not None:
@@ -228,12 +299,26 @@ async def _report_log_record(client: Any, record: logging.LogRecord) -> None:
 
 
 def _schedule(coroutine: Any) -> None:
+    global _pending_reports
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        coroutine.close()
         return
-    if loop.is_running():
-        loop.create_task(coroutine)
+    if not loop.is_running() or _pending_reports >= _MAX_PENDING_REPORTS:
+        coroutine.close()
+        return
+
+    _pending_reports += 1
+    task = loop.create_task(coroutine)
+
+    def _done(_task: "asyncio.Task") -> None:
+        global _pending_reports
+        _pending_reports = max(0, _pending_reports - 1)
+        if not _task.cancelled():
+            _task.exception()  # mark retrieved, never log it again
+
+    task.add_done_callback(_done)
 
 
 class TelegramErrorLogHandler(logging.Handler):
@@ -241,6 +326,8 @@ class TelegramErrorLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.levelno < ERROR_LEVEL:
+            return
+        if record.name.startswith(_IGNORED_LOGGER_PREFIXES):
             return
         client = _current_client.get() or _main_client
         if client is not None:
