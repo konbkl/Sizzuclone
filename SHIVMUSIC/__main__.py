@@ -1,4 +1,15 @@
 import asyncio
+try:
+    # Raise the open-file limit so many clones/sockets do not hit
+    # "[Errno 24] Too many open files" (Linux/VPS only).
+    import resource
+
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    _target = 65535 if _hard == resource.RLIM_INFINITY else min(65535, _hard)
+    if _soft < _target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (_target, _hard))
+except Exception:
+    pass
 import importlib
 import os
 import glob
