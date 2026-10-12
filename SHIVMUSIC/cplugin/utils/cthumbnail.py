@@ -51,7 +51,7 @@ async def download_user_photo(user_id):
     return None
 
 # --- MAIN THUMBNAIL FUNCTION ---
-async def get_thumb(videoid, user_id, client):
+async def _old_get_thumb(videoid, user_id, client):
     # Fetching Bot and Owner details
     me = await client.get_me()
     bot_name = me.first_name.upper() if me.first_name else "MUSIC BOT"
@@ -166,3 +166,15 @@ async def get_thumb(videoid, user_id, client):
     if os.path.exists(f"cache/temp_{videoid}.jpg"): os.remove(f"cache/temp_{videoid}.jpg")
     if u_photo and os.path.exists(u_photo): os.remove(u_photo)
     return filename
+
+
+# ---- New glass player card for clone bots; the old generator stays as a fallback ----
+from SHIVMUSIC.utils.clonecard import make_clone_card
+
+
+async def get_thumb(videoid, user_id, client=None):
+    path = await make_clone_card(videoid, user_id)
+    if path:
+        return path
+    return await _old_get_thumb(videoid, user_id, client)
+                                  
